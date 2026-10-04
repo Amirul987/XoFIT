@@ -18,7 +18,9 @@
         ],
         "NSLocationWhenInUseUsageDescription": "Aplikasi membutuhkan akses lokasi untuk merekam rute saat beraktivitas.",
         "NSLocationAlwaysAndWhenInUseUsageDescription": "Aplikasi membutuhkan akses lokasi di latar belakang agar langkah dan rute tetap tercatat saat layar mati.",
-        "NSMotionUsageDescription": "Aplikasi membutuhkan sensor gerak untuk menghitung jumlah langkah kaki harian secara akurat."
+        "NSMotionUsageDescription": "Aplikasi membutuhkan sensor gerak untuk menghitung jumlah langkah kaki harian secara akurat.",
+        "NSPhotoLibraryUsageDescription": "Aplikasi membutuhkan izin galeri untuk menyimpan hasil gambar aktivitas kamu.",
+        "NSPhotoLibraryAddUsageDescription": "Aplikasi membutuhkan izin untuk menyimpan berkas gambar hasil latihan ke galeri."
       }
     },
     "android": {
@@ -36,11 +38,10 @@
         "ACTIVITY_RECOGNITION",
         "FOREGROUND_SERVICE",
         "FOREGROUND_SERVICE_LOCATION",
-        "android.permission.ACCESS_COARSE_LOCATION",
-        "android.permission.ACCESS_FINE_LOCATION",
-        "android.permission.ACCESS_BACKGROUND_LOCATION",
-        "android.permission.ACTIVITY_RECOGNITION",
-        "android.permission.FOREGROUND_SERVICE"
+        "POST_NOTIFICATIONS",
+        "READ_MEDIA_IMAGES",
+        "WRITE_EXTERNAL_STORAGE",
+        "READ_EXTERNAL_STORAGE"
       ],
       "package": "com.stabiloo404.xoxo"
     },
@@ -62,13 +63,22 @@
       [
         "expo-location",
         {
-          "locationAlwaysAndWhenInUsePermission": "Izinkan aplikasi merekam rute dan aktivitas di latar belakang."
+          "locationAlwaysAndWhenInUsePermission": "Izinkan aplikasi merekam rute dan aktivitas di latar belakang.",
+          "isAndroidBackgroundLocationEnabled": true,
+          "isAndroidForegroundServiceEnabled": true
         }
       ],
       [
         "expo-sensors",
         {
           "motionPermission": "Izinkan aplikasi menghitung langkah kaki harian kamu secara akurat."
+        }
+      ],
+      [
+        "expo-media-library",
+        {
+          "photosPermission": "Izinkan XoFit mengakses dan menyimpan gambar ke galeri.",
+          "savePhotosPermission": "Izinkan XoFit menyimpan berkas gambar hasil aktivitas ke galeri ponsel."
         }
       ],
       "expo-image",

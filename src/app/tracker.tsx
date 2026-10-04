@@ -15,10 +15,13 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import { useRouter } from 'expo-router';
 import { WebView } from 'react-native-webview';
 import * as Location from 'expo-location';
+import * as TaskManager from 'expo-task-manager';
 import { Accelerometer } from 'expo-sensors';
 import { Ionicons } from '@expo/vector-icons';
+import AsyncStorage from '@react-native-async-storage/async-storage';
 import { saveActivity, getProfile, ActivityType } from '../utils/storage';
 import NotificationModal from '../components/NotificationModal';
+import { TRACKER_LOCATION_TASK, TRACKER_STATE_KEY } from '../utils/backgroundTrackerTask';
 
 interface Coordinate {
   latitude: number;
@@ -102,9 +105,9 @@ export default function TrackerScreen() {
   const [userWeight, setUserWeight] = useState(65);
 
   const [targetDistanceKm, setTargetDistanceKm] = useState<number | null>(null);
-  const [targetPaceSec, setTargetPaceSec] = useState<number | null>(null);
   const [showTargetSetupModal, setShowTargetSetupModal] = useState(false);
   const [targetDistInput, setTargetDistInput] = useState('');
+  const targetReachedNotified = useRef(false);
 
   const [showSaveModal, setShowSaveModal] = useState(false);
   const [activityTitle, setActivityTitle] = useState('');
@@ -118,6 +121,7 @@ export default function TrackerScreen() {
     confirmText?: string;
     cancelText?: string;
     onConfirm: () => void;
+    onCancel?: () => void;
   }>({
     visible: false,
     title: '',
@@ -131,56 +135,67 @@ export default function TrackerScreen() {
   });
 
   const timerRef = useRef<any>(null);
-  const locationSub = useRef<Location.LocationSubscription | null>(null);
+  const locationSubRef = useRef<Location.LocationSubscription | null>(null);
   const accelSub = useRef<any>(null);
-  const lastAccelMag = useRef(0);
-  const lastStepTime = useRef(0);
-  const currentSpeedRef = useRef(0);
-  const isActuallyWalkingRef = useRef(false);
 
-  // Pencarian GPS Instan Cepat (Memanfaatkan Cache LastKnown Terlebih Dahulu)
+  const lastStepTime = useRef(0);
+  const lastAccelMag = useRef(0);
+  const lastAltitudeRef = useRef<number | null>(null);
+  const isMovingPhysically = useRef(false);
+
   useEffect(() => {
     (async () => {
       const p = await getProfile();
       if (p) setUserWeight(p.weight);
 
-      if (Platform.OS === 'android' && Platform.Version >= 29) {
+      if (Platform.OS === 'android') {
         try {
-          await PermissionsAndroid.request(PermissionsAndroid.PERMISSIONS.ACTIVITY_RECOGNITION);
+          if (Platform.Version >= 29) {
+            await PermissionsAndroid.request(PermissionsAndroid.PERMISSIONS.ACTIVITY_RECOGNITION);
+          }
+          if (Platform.Version >= 33) {
+            await PermissionsAndroid.request(PermissionsAndroid.PERMISSIONS.POST_NOTIFICATIONS);
+          }
         } catch (e) {}
       }
 
-      const { status } = await Location.requestForegroundPermissionsAsync();
-      if (status === 'granted') {
+      const { status: fgStatus } = await Location.requestForegroundPermissionsAsync();
+      await Location.requestBackgroundPermissionsAsync().catch(() => {});
+
+      if (fgStatus === 'granted') {
         try {
-          // 1. Ambil lokasi terakhir dari cache sistem (Instan < 50ms)
           const lastLoc = await Location.getLastKnownPositionAsync();
           if (lastLoc) {
             const pos = { latitude: lastLoc.coords.latitude, longitude: lastLoc.coords.longitude };
             setCurrentCoord(pos);
             setGpsAccuracy(lastLoc.coords.accuracy || 12);
             if (webViewRef.current) {
-              webViewRef.current.injectJavaScript(`if (window.updateInitialPosition) { window.updateInitialPosition(${pos.latitude}, ${pos.longitude}); } true;`);
+              webViewRef.current.injectJavaScript(
+                `if (window.updateInitialPosition) { window.updateInitialPosition(${pos.latitude}, ${pos.longitude}); } true;`
+              );
             }
           }
 
-          // 2. Ambil koordinat GPS akurat terkini
           const currentLoc = await Location.getCurrentPositionAsync({
             accuracy: Location.Accuracy.Balanced,
           });
           const exactPos = { latitude: currentLoc.coords.latitude, longitude: currentLoc.coords.longitude };
           setCurrentCoord(exactPos);
-          setGpsAccuracy(currentLoc.coords.accuracy || 8);
+          setGpsAccuracy(currentLoc.coords.accuracy || 6);
           if (webViewRef.current) {
-            webViewRef.current.injectJavaScript(`if (window.updateInitialPosition) { window.updateInitialPosition(${exactPos.latitude}, ${exactPos.longitude}); } true;`);
+            webViewRef.current.injectJavaScript(
+              `if (window.updateInitialPosition) { window.updateInitialPosition(${exactPos.latitude}, ${exactPos.longitude}); } true;`
+            );
           }
         } catch (e) {
-          console.log('GPS quick lock timeout', e);
+          console.log('GPS init error', e);
         }
       }
     })();
 
-    return () => cleanupTracker();
+    return () => {
+      cleanupTracker();
+    };
   }, []);
 
   useEffect(() => {
@@ -206,10 +221,33 @@ export default function TrackerScreen() {
     overlayBg: isDark ? 'rgba(9, 13, 22, 0.94)' : 'rgba(255, 255, 255, 0.95)',
   };
 
-  const cleanupTracker = () => {
+  const getGpsStatusMeta = () => {
+    if (gpsAccuracy === null) {
+      return { label: 'Mencari GPS', color: '#f59e0b' };
+    }
+    if (gpsAccuracy <= 8) {
+      return { label: 'GPS: Tinggi', color: '#22c55e' };
+    }
+    if (gpsAccuracy <= 18) {
+      return { label: 'GPS: Sedang', color: '#38bdf8' };
+    }
+    return { label: 'GPS: Lemah', color: '#ef4444' };
+  };
+
+  const gpsStatus = getGpsStatusMeta();
+
+  const cleanupTracker = async () => {
     if (timerRef.current) clearInterval(timerRef.current);
-    if (locationSub.current) locationSub.current.remove();
+    if (locationSubRef.current) locationSubRef.current.remove();
     if (accelSub.current) accelSub.current.remove();
+
+    try {
+      const isRegistered = await TaskManager.isTaskRegisteredAsync(TRACKER_LOCATION_TASK);
+      if (isRegistered) {
+        await Location.stopLocationUpdatesAsync(TRACKER_LOCATION_TASK);
+      }
+      await AsyncStorage.removeItem(TRACKER_STATE_KEY);
+    } catch (e) {}
   };
 
   const handleBackPress = () => {
@@ -221,8 +259,8 @@ export default function TrackerScreen() {
         message: 'Aktivitas sedang berjalan. Keluar sekarang akan membatalkan seluruh data sesi ini.',
         confirmText: 'Keluar & Batal',
         cancelText: 'Lanjut Latihan',
-        onConfirm: () => {
-          cleanupTracker();
+        onConfirm: async () => {
+          await cleanupTracker();
           setIsTracking(false);
           setModalConfig(prev => ({ ...prev, visible: false }));
           router.back();
@@ -241,46 +279,70 @@ export default function TrackerScreen() {
     setDistanceMeters(0);
     setElevationGain(0);
     setRouteCoordinates([]);
-    currentSpeedRef.current = 0;
-    isActuallyWalkingRef.current = false;
+    setCurrentSpeedMs(0);
+    targetReachedNotified.current = false;
+    lastAltitudeRef.current = null;
+    isMovingPhysically.current = false;
 
-    timerRef.current = setInterval(() => {
-      setSeconds(prev => prev + 1);
-    }, 1000);
+    const initialCoord = currentCoord.latitude !== -6.175392 ? currentCoord : null;
 
-    if (mode === 'walk') {
-      Accelerometer.setUpdateInterval(120);
-      accelSub.current = Accelerometer.addListener(data => {
-        const mag = Math.sqrt(data.x * data.x + data.y * data.y + data.z * data.z);
-        const delta = Math.abs(mag - lastAccelMag.current);
-        const now = Date.now();
+    await AsyncStorage.setItem(
+      TRACKER_STATE_KEY,
+      JSON.stringify({
+        isTracking: true,
+        isPaused: false,
+        mode,
+        seconds: 0,
+        distanceMeters: 0,
+        elevationGain: 0,
+        lastAltitude: null,
+        lastCoord: initialCoord,
+        route: initialCoord ? [initialCoord] : [],
+      })
+    );
 
-        const isPhysicallyMoving = isActuallyWalkingRef.current || currentSpeedRef.current >= 0.45;
+    // Sensor Pedometer Anti-Goyang (Memerlukan sinkronisasi gerak + kecepatan GPS)
+    Accelerometer.setUpdateInterval(150);
+    accelSub.current = Accelerometer.addListener(data => {
+      const mag = Math.sqrt(data.x * data.x + data.y * data.y + data.z * data.z);
+      const delta = Math.abs(mag - lastAccelMag.current);
+      const now = Date.now();
 
-        if (isPhysicallyMoving && delta > 0.42 && now - lastStepTime.current > 280) {
+      // Langkah hanya dihitung jika ada perpindahan fisik nyata (kecepatan GPS > 0.4 m/s)
+      if (isMovingPhysically.current && delta > 0.45 && now - lastStepTime.current > 320) {
+        if (mode === 'walk') {
           setStepCount(prev => prev + 1);
-          lastStepTime.current = now;
         }
-        lastAccelMag.current = mag;
-      });
-    }
+        lastStepTime.current = now;
+      }
+      lastAccelMag.current = mag;
+    });
 
-    locationSub.current = await Location.watchPositionAsync(
+    locationSubRef.current = await Location.watchPositionAsync(
       {
         accuracy: Location.Accuracy.BestForNavigation,
         timeInterval: 1000,
-        distanceInterval: 1.2,
+        distanceInterval: 1,
       },
       loc => {
-        const acc = loc.coords.accuracy || 99;
-        const spd = loc.coords.speed || 0;
+        const acc = loc.coords.accuracy ?? 99;
+        const spd = loc.coords.speed ?? 0;
 
         setGpsAccuracy(acc);
-        const validSpeed = spd > 0.3 ? spd : 0;
-        setCurrentSpeedMs(validSpeed);
-        currentSpeedRef.current = validSpeed;
 
-        if (acc > 25) return;
+        if (acc > 16) return;
+
+        const minSpeed = mode === 'bike' ? 1.0 : mode === 'run' ? 0.65 : 0.4;
+        const isSpeedValid = spd >= minSpeed;
+        isMovingPhysically.current = isSpeedValid;
+
+        if (!isSpeedValid) {
+          setCurrentSpeedMs(0);
+          return;
+        }
+
+        const validDisplaySpeed = spd > 0.3 ? spd : 0;
+        setCurrentSpeedMs(validDisplaySpeed);
 
         const newPoint: Coordinate = {
           latitude: loc.coords.latitude,
@@ -288,49 +350,125 @@ export default function TrackerScreen() {
           altitude: loc.coords.altitude,
         };
 
-        if (webViewRef.current) {
-          webViewRef.current.injectJavaScript(`if (window.updateTrackingPosition) { window.updateTrackingPosition(${newPoint.latitude}, ${newPoint.longitude}); } true;`);
-        }
-
         setRouteCoordinates(prev => {
           if (prev.length > 0) {
             const last = prev[prev.length - 1];
             const addedMeters = calculateDistanceMeters(last, newPoint);
 
-            if (addedMeters >= 1.6) {
-              isActuallyWalkingRef.current = true;
-              setDistanceMeters(curr => curr + addedMeters);
+            const minMovementDist = mode === 'bike' ? 4.5 : mode === 'run' ? 3.0 : 2.2;
 
-              if (last.altitude != null && newPoint.altitude != null) {
-                const diff = newPoint.altitude - last.altitude;
-                if (diff > 0.5 && diff < 30) {
-                  setElevationGain(curr => Math.round(curr + diff));
+            if (addedMeters >= minMovementDist) {
+              const maxSpeedMps = mode === 'bike' ? 24 : 12;
+              if (addedMeters > maxSpeedMps * 2) {
+                return prev;
+              }
+
+              const nextTotalDist = distanceMeters + addedMeters;
+              setDistanceMeters(nextTotalDist);
+
+              // Cek Target Tercapai
+              if (
+                targetDistanceKm !== null &&
+                !targetReachedNotified.current &&
+                nextTotalDist >= targetDistanceKm * 1000
+              ) {
+                targetReachedNotified.current = true;
+                setModalConfig({
+                  visible: true,
+                  type: 'success',
+                  title: 'Target Tercapai!',
+                  message: `Selamat! Anda telah mencapai target jarak ${targetDistanceKm} km. Apakah ingin mengakhiri sesi sekarang?`,
+                  confirmText: 'Selesai',
+                  cancelText: 'Lanjut',
+                  onConfirm: () => {
+                    setModalConfig(p => ({ ...p, visible: false }));
+                    handleFinish();
+                  },
+                  onCancel: () => {
+                    setModalConfig(p => ({ ...p, visible: false }));
+                  },
+                });
+              }
+
+              if (webViewRef.current) {
+                webViewRef.current.injectJavaScript(
+                  `if (window.updateTrackingPosition) { window.updateTrackingPosition(${newPoint.latitude}, ${newPoint.longitude}); } true;`
+                );
+              }
+
+              if (newPoint.altitude != null) {
+                if (lastAltitudeRef.current == null) {
+                  lastAltitudeRef.current = newPoint.altitude;
+                } else {
+                  const diff = newPoint.altitude - lastAltitudeRef.current;
+                  if (diff >= 1.8 && diff < 15) {
+                    setElevationGain(curr => Math.round(curr + diff));
+                    lastAltitudeRef.current = newPoint.altitude;
+                  } else if (diff <= -1.8) {
+                    lastAltitudeRef.current = newPoint.altitude;
+                  }
                 }
               }
+
               return [...prev, newPoint];
-            } else {
-              isActuallyWalkingRef.current = false;
             }
             return prev;
           }
+
+          lastAltitudeRef.current = newPoint.altitude ?? null;
           return [newPoint];
         });
       }
     );
+
+    try {
+      const notifTitle =
+        mode === 'run' ? 'Lari Sedang Berlangsung' : mode === 'bike' ? 'Gowes Sedang Berlangsung' : 'Jalan Santai Berlangsung';
+
+      await Location.startLocationUpdatesAsync(TRACKER_LOCATION_TASK, {
+        accuracy: Location.Accuracy.BestForNavigation,
+        timeInterval: 2000,
+        distanceInterval: mode === 'bike' ? 5 : 3,
+        showsBackgroundLocationIndicator: true,
+        foregroundService: {
+          notificationTitle: notifTitle,
+          notificationBody: 'Melacak aktivitas olahraga aktif...',
+          notificationColor: '#ea580c',
+        },
+      });
+    } catch (e) {
+      console.log('Background task error:', e);
+    }
+
+    timerRef.current = setInterval(() => {
+      setSeconds(prev => prev + 1);
+    }, 1000);
   };
 
-  const togglePause = () => {
+  const togglePause = async () => {
     if (isPaused) {
       setIsPaused(false);
       timerRef.current = setInterval(() => setSeconds(s => s + 1), 1000);
+      const raw = await AsyncStorage.getItem(TRACKER_STATE_KEY);
+      if (raw) {
+        const st = JSON.parse(raw);
+        await AsyncStorage.setItem(TRACKER_STATE_KEY, JSON.stringify({ ...st, isPaused: false }));
+      }
     } else {
       setIsPaused(true);
+      setCurrentSpeedMs(0);
+      isMovingPhysically.current = false;
       if (timerRef.current) clearInterval(timerRef.current);
+      const raw = await AsyncStorage.getItem(TRACKER_STATE_KEY);
+      if (raw) {
+        const st = JSON.parse(raw);
+        await AsyncStorage.setItem(TRACKER_STATE_KEY, JSON.stringify({ ...st, isPaused: true }));
+      }
     }
   };
 
-  const handleFinish = () => {
-    cleanupTracker();
+  const handleFinish = async () => {
+    await cleanupTracker();
     setIsTracking(false);
     setIsPaused(false);
 
@@ -368,7 +506,7 @@ export default function TrackerScreen() {
       durationFormatted: formatTime(seconds),
       distanceMeters,
       distanceDisplay: getFormattedDistance(distanceMeters),
-      paceFormatted: calculateInstantPace(),
+      paceFormatted: calculateInstantPace(seconds, distanceMeters),
       steps: mode === 'walk' ? stepCount : 0,
       calories,
       elevationGain,
@@ -402,15 +540,10 @@ export default function TrackerScreen() {
     return `${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`;
   };
 
-  const getPaceInSeconds = () => {
-    if (currentSpeedMs > 0.3) return 1000 / currentSpeedMs;
-    if (distanceMeters >= 2 && seconds >= 1) return (seconds / distanceMeters) * 1000;
-    return null;
-  };
-
-  const calculateInstantPace = () => {
-    const paceSec = getPaceInSeconds();
-    if (!paceSec || paceSec > 2400) return '--:--';
+  const calculateInstantPace = (sec: number, meters: number) => {
+    if (meters < 10 || sec < 2) return "--'--\"";
+    const paceSec = (sec / meters) * 1000;
+    if (paceSec > 2400) return "--'--\"";
     const m = Math.floor(paceSec / 60);
     const s = Math.floor(paceSec % 60);
     return `${m}'${String(s).padStart(2, '0')}"`;
@@ -430,19 +563,19 @@ export default function TrackerScreen() {
               style={[
                 styles.targetToggleBtn,
                 { borderColor: '#38bdf8', backgroundColor: theme.card },
-                (targetDistanceKm || targetPaceSec) && styles.targetToggleActive,
+                targetDistanceKm !== null && styles.targetToggleActive,
               ]}
               onPress={() => setShowTargetSetupModal(true)}
             >
               <Ionicons
                 name="flag"
                 size={14}
-                color={targetDistanceKm || targetPaceSec ? '#ffffff' : '#38bdf8'}
+                color={targetDistanceKm !== null ? '#ffffff' : '#38bdf8'}
               />
               <Text
                 style={[
                   styles.targetToggleText,
-                  (targetDistanceKm || targetPaceSec) && { color: '#ffffff' },
+                  targetDistanceKm !== null && { color: '#ffffff' },
                 ]}
               >
                 {targetDistanceKm ? `${targetDistanceKm} km` : 'Target'}
@@ -450,11 +583,10 @@ export default function TrackerScreen() {
             </TouchableOpacity>
           )}
 
+          {/* Indikator Status GPS: Tinggi, Sedang, Lemah */}
           <View style={[styles.gpsBadge, { backgroundColor: theme.card, borderColor: theme.border }]}>
-            <View style={[styles.gpsDot, { backgroundColor: gpsAccuracy && gpsAccuracy <= 15 ? '#22c55e' : '#f59e0b' }]} />
-            <Text style={[styles.gpsText, { color: gpsAccuracy && gpsAccuracy <= 15 ? '#22c55e' : '#f59e0b' }]}>
-              {gpsAccuracy && gpsAccuracy <= 15 ? 'GPS Siap' : 'Mencari GPS...'}
-            </Text>
+            <View style={[styles.gpsDot, { backgroundColor: gpsStatus.color }]} />
+            <Text style={[styles.gpsText, { color: gpsStatus.color }]}>{gpsStatus.label}</Text>
           </View>
         </View>
       </View>
@@ -493,7 +625,7 @@ export default function TrackerScreen() {
                 </View>
                 <View style={styles.metricItem}>
                   <Text style={[styles.metricLabel, { color: theme.textMuted }]}>PACE</Text>
-                  <Text style={styles.metricSub}>{calculateInstantPace()}</Text>
+                  <Text style={styles.metricSub}>{calculateInstantPace(seconds, distanceMeters)}</Text>
                 </View>
               </View>
             </>
@@ -512,7 +644,7 @@ export default function TrackerScreen() {
                 <View style={styles.metricItem}>
                   <Text style={[styles.metricLabel, { color: theme.textMuted }]}>PACE</Text>
                   <Text style={[styles.metricBig, { color: theme.textMain }]}>
-                    {calculateInstantPace()} <Text style={styles.metricUnit}>/km</Text>
+                    {calculateInstantPace(seconds, distanceMeters)} <Text style={styles.metricUnit}>/km</Text>
                   </Text>
                 </View>
               </View>
@@ -541,7 +673,7 @@ export default function TrackerScreen() {
                 </View>
                 <View style={styles.metricItem}>
                   <Text style={[styles.metricLabel, { color: theme.textMuted }]}>ELEVASI</Text>
-                  <Text style={[styles.metricBig, { color: '#34d399' }]}>+{elevationGain} m</Text>
+                  <Text style={[styles.metricSub, { color: '#34d399' }]}>+{elevationGain} m</Text>
                 </View>
               </View>
               <View style={[styles.overlayRow, { marginTop: 6 }]}>
@@ -551,7 +683,9 @@ export default function TrackerScreen() {
                 </View>
                 <View style={styles.metricItem}>
                   <Text style={[styles.metricLabel, { color: theme.textMuted }]}>KECEPATAN</Text>
-                  <Text style={[styles.metricSub, { color: '#f59e0b' }]}>{(currentSpeedMs * 3.6).toFixed(1)} km/j</Text>
+                  <Text style={[styles.metricSub, { color: '#f59e0b' }]}>
+                    {(currentSpeedMs * 3.6).toFixed(1)} km/j
+                  </Text>
                 </View>
               </View>
             </>
@@ -684,7 +818,7 @@ export default function TrackerScreen() {
               </View>
               <View style={styles.miniItem}>
                 <Text style={[styles.miniLabel, { color: theme.textMuted }]}>Pace</Text>
-                <Text style={styles.miniVal}>{calculateInstantPace()}</Text>
+                <Text style={styles.miniVal}>{calculateInstantPace(seconds, distanceMeters)}</Text>
               </View>
             </View>
 
@@ -717,7 +851,7 @@ export default function TrackerScreen() {
         confirmText={modalConfig.confirmText}
         cancelText={modalConfig.cancelText}
         onConfirm={modalConfig.onConfirm}
-        onCancel={() => setModalConfig(prev => ({ ...prev, visible: false }))}
+        onCancel={modalConfig.onCancel}
       />
     </SafeAreaView>
   );
@@ -733,7 +867,7 @@ const styles = StyleSheet.create({
   targetToggleText: { fontSize: 11, fontWeight: '700', color: '#38bdf8' },
   gpsBadge: { flexDirection: 'row', alignItems: 'center', paddingHorizontal: 10, paddingVertical: 5, borderRadius: 20, borderWidth: 1, gap: 6 },
   gpsDot: { width: 8, height: 8, borderRadius: 4 },
-  gpsText: { fontSize: 11, fontWeight: '700' },
+  gpsText: { fontSize: 11, fontWeight: '800' },
   mapArea: { flex: 1, position: 'relative' },
   map: { width: '100%', height: '100%' },
   overlayCard: { position: 'absolute', top: 12, left: 14, right: 14, borderRadius: 16, padding: 14, borderWidth: 1 },

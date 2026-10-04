@@ -13,6 +13,7 @@ import {
   PanResponder,
   useColorScheme,
   Alert,
+  Platform,
 } from 'react-native';
 import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useRouter, useFocusEffect } from 'expo-router';
@@ -22,7 +23,7 @@ import { Pedometer } from 'expo-sensors';
 import { Ionicons } from '@expo/vector-icons';
 import ViewShot, { captureRef } from 'react-native-view-shot';
 import * as Sharing from 'expo-sharing';
-import * as MediaLibrary from 'expo-media-library';
+import * as FileSystem from 'expo-file-system/legacy';
 import Svg, { Path, Circle, Defs, LinearGradient as SvgGrad, Stop, Polyline } from 'react-native-svg';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import {
@@ -32,11 +33,33 @@ import {
   ActivityHistory,
   DailyGoal,
 } from '../utils/storage';
-import { exportActivityToGpx } from '../utils/gpxHelper';
+import { shareActivityGpx, downloadActivityGpx } from '../utils/gpxHelper';
 import { requestBackgroundStepPermissions } from '../utils/backgroundStepTask';
 import NotificationModal from '../components/NotificationModal';
 
 const { width } = Dimensions.get('window');
+
+const SolidFlameWithNumber = ({ count, size = 56 }: { count: number; size?: number }) => {
+  return (
+    <View style={{ width: size, height: size * 1.15, alignItems: 'center', justifyContent: 'center' }}>
+      <Svg width={size} height={size * 1.15} viewBox="0 0 24 28">
+        <Defs>
+          <SvgGrad id="flameSolidGrad" x1="0" y1="0" x2="0" y2="1">
+            <Stop offset="0%" stopColor="#f97316" />
+            <Stop offset="100%" stopColor="#ea580c" />
+          </SvgGrad>
+        </Defs>
+        <Path
+          d="M12 0C11.5 3 9 5.5 8 8C7 5.5 5 5 4 6.5C2.5 8.5 2 11.5 2 15C2 21 6.5 27 12 27C17.5 27 22 21 22 15C22 10.5 19 6 15 3C14.8 5 13.5 6.5 12 7C12.5 4.5 12.5 2 12 0Z"
+          fill="url(#flameSolidGrad)"
+        />
+      </Svg>
+      <View style={styles.solidFlameNumberBadge}>
+        <Text style={[styles.solidFlameNumberText, { fontSize: size > 40 ? 15 : 11 }]}>{count}</Text>
+      </View>
+    </View>
+  );
+};
 
 interface RoutineStep {
   name: string;
@@ -124,12 +147,12 @@ export default function MainApp() {
   const [progressFilter, setProgressFilter] = useState<'all' | 'run' | 'bike' | 'walk'>('all');
   const [selectedWeekIndex, setSelectedWeekIndex] = useState<number>(11);
 
-  const [selectedShareItem, setSelectedShareItem] = useState<ActivityHistory | null>(null);
+  // State Modal Unduh/Bagikan Gambar
   const [selectedDownloadItem, setSelectedDownloadItem] = useState<ActivityHistory | null>(null);
-
-  const shareCardRef = useRef<ViewShot>(null);
   const downloadCardRef = useRef<ViewShot>(null);
-  const streakShareRef = useRef<ViewShot>(null);
+
+  // State Modal Aksi GPX (Unduh vs Bagikan)
+  const [selectedGpxItem, setSelectedGpxItem] = useState<ActivityHistory | null>(null);
 
   const [streakModalVisible, setStreakModalVisible] = useState(false);
 
@@ -168,6 +191,8 @@ export default function MainApp() {
   });
 
   const radarMapRef = useRef<WebView>(null);
+  const pedometerSubRef = useRef<any>(null);
+  const lastRecordedPedometerSteps = useRef<number | null>(null);
 
   const streakPanResponder = useRef(
     PanResponder.create({
@@ -184,24 +209,44 @@ export default function MainApp() {
   const syncBackgroundSteps = async () => {
     try {
       const isAvailable = await Pedometer.isAvailableAsync();
-      if (isAvailable) {
+      if (!isAvailable) return;
+
+      if (Platform.OS === 'ios') {
         const start = new Date();
         start.setHours(0, 0, 0, 0);
         const end = new Date();
         const pedo = await Pedometer.getStepCountAsync(start, end);
-        if (pedo && pedo.steps >= 0) {
+        if (pedo && typeof pedo.steps === 'number') {
           const updated = await updateDailyStats({ steps: pedo.steps });
           setDaily(updated);
         }
+      } else {
+        if (!pedometerSubRef.current) {
+          pedometerSubRef.current = Pedometer.watchStepCount(async result => {
+            if (result && typeof result.steps === 'number') {
+              if (lastRecordedPedometerSteps.current === null) {
+                lastRecordedPedometerSteps.current = result.steps;
+                return;
+              }
+              const deltaSteps = result.steps - lastRecordedPedometerSteps.current;
+              if (deltaSteps > 0) {
+                lastRecordedPedometerSteps.current = result.steps;
+                const current = await getDailyStats();
+                const updated = await updateDailyStats({ steps: (current?.steps || 0) + deltaSteps });
+                setDaily(updated);
+              }
+            }
+          });
+        }
       }
     } catch (e) {
-      console.log('Background Pedometer check error:', e);
+      console.log('Pedometer check error:', e);
     }
   };
 
   const loadData = async () => {
     const [h, d] = await Promise.all([getHistory(), getDailyStats()]);
-    setHistory(h);
+    setHistory(h || []);
     setDaily(d);
     await syncBackgroundSteps();
   };
@@ -209,6 +254,13 @@ export default function MainApp() {
   useFocusEffect(
     useCallback(() => {
       loadData();
+      return () => {
+        if (pedometerSubRef.current) {
+          pedometerSubRef.current.remove();
+          pedometerSubRef.current = null;
+          lastRecordedPedometerSteps.current = null;
+        }
+      };
     }, [])
   );
 
@@ -284,7 +336,7 @@ export default function MainApp() {
         const roadDist = (json.routes[0].distance / 1000).toFixed(2);
         return { coords: roadCoords, dist: parseFloat(roadDist) };
       }
-    } catch (e) {
+    } catch {
       try {
         const coordString = points.map(p => `${p[1]},${p[0]}`).join(';');
         const urlFallback = `https://router.project-osrm.org/route/v1/${type === 'run' ? 'foot' : 'bike'}/${coordString}?overview=full&geometries=geojson&continue_straight=true`;
@@ -295,7 +347,7 @@ export default function MainApp() {
           const roadDist = (jsonFb.routes[0].distance / 1000).toFixed(2);
           return { coords: roadCoords, dist: parseFloat(roadDist) };
         }
-      } catch (err) {}
+      } catch {}
     }
     return { coords: points, dist: type === 'run' ? 2.85 : 14.2 };
   };
@@ -441,57 +493,77 @@ export default function MainApp() {
     });
   };
 
-  const handleExecuteShare = async () => {
-    try {
-      if (!shareCardRef.current) return;
-      const uri = await captureRef(shareCardRef, { format: 'png', quality: 1.0 });
-      await Sharing.shareAsync(uri);
-    } catch (e) {
-      console.log('Share error:', e);
-    }
-  };
-
-  const handleExecuteDownload = async () => {
+  // 1. Eksekusi Unduh Gambar ke Galeri / Memori
+  const handleExecuteSaveImage = async () => {
     try {
       if (!downloadCardRef.current) return;
+      await new Promise(r => setTimeout(r, 150));
       const uri = await captureRef(downloadCardRef, { format: 'png', quality: 1.0 });
 
-      const { status } = await MediaLibrary.requestPermissionsAsync();
-      if (status === 'granted') {
-        await MediaLibrary.saveToLibraryAsync(uri);
-        Alert.alert('Berhasil Disimpan', 'Gambar hasil aktivitas berlatar transparan telah disimpan ke galeri ponsel kamu.');
-        setSelectedDownloadItem(null);
-      } else {
-        await Sharing.shareAsync(uri);
-        setSelectedDownloadItem(null);
+      if (Platform.OS === 'android') {
+        const permissions = await FileSystem.StorageAccessFramework.requestDirectoryPermissionsAsync();
+        if (permissions.granted) {
+          const base64Data = await FileSystem.readAsStringAsync(uri, { encoding: FileSystem.EncodingType.Base64 });
+          const fileName = `xofit_${Date.now()}.png`;
+          const createdUri = await FileSystem.StorageAccessFramework.createFileAsync(
+            permissions.directoryUri,
+            fileName,
+            'image/png'
+          );
+          await FileSystem.writeAsStringAsync(createdUri, base64Data, { encoding: FileSystem.EncodingType.Base64 });
+          Alert.alert('Berhasil Disimpan', 'Gambar hasil aktivitas telah disimpan ke memori perangkat.');
+          setSelectedDownloadItem(null);
+          return;
+        }
       }
-    } catch (e) {
-      console.log('Download error:', e);
+
+      // Fallback
+      await Sharing.shareAsync(uri, { mimeType: 'image/png', dialogTitle: 'Simpan Gambar' });
+      setSelectedDownloadItem(null);
+    } catch {
       Alert.alert('Gagal Mengunduh', 'Tidak dapat memproses berkas gambar hasil aktivitas.');
     }
   };
 
-  const handleShareStreak = async () => {
+  // 2. Eksekusi Bagikan Gambar
+  const handleExecuteShareImage = async () => {
     try {
-      if (!streakShareRef.current) return;
-      const uri = await captureRef(streakShareRef, { format: 'png', quality: 1.0 });
-      await Sharing.shareAsync(uri);
-    } catch (e) {
-      console.log('Streak Share error:', e);
+      if (!downloadCardRef.current) return;
+      await new Promise(r => setTimeout(r, 150));
+      const uri = await captureRef(downloadCardRef, { format: 'png', quality: 1.0 });
+
+      const fileName = `xofit_${Date.now()}.png`;
+      const targetPath = `${FileSystem.cacheDirectory}${fileName}`;
+      await FileSystem.copyAsync({ from: uri, to: targetPath });
+
+      await Sharing.shareAsync(targetPath, {
+        mimeType: 'image/png',
+        dialogTitle: 'Bagikan Hasil Aktivitas',
+        UTI: 'public.png',
+      });
+      setSelectedDownloadItem(null);
+    } catch {
+      Alert.alert('Gagal Membagikan', 'Terjadi kesalahan saat membagikan gambar.');
     }
   };
 
-  const handleExportGpxFile = async (item: ActivityHistory) => {
-    const success = await exportActivityToGpx(item);
+  // 3. Eksekusi Unduh File GPX
+  const handleExecuteDownloadGpx = async () => {
+    if (!selectedGpxItem) return;
+    const success = await downloadActivityGpx(selectedGpxItem);
+    setSelectedGpxItem(null);
+    if (success) {
+      Alert.alert('Berhasil', 'Berkas GPX berhasil disimpan ke memori penyimpanan.');
+    }
+  };
+
+  // 4. Eksekusi Bagikan File GPX
+  const handleExecuteShareGpx = async () => {
+    if (!selectedGpxItem) return;
+    const success = await shareActivityGpx(selectedGpxItem);
+    setSelectedGpxItem(null);
     if (!success) {
-      setModalConfig({
-        visible: true,
-        type: 'warning',
-        title: 'Ekspor GPX',
-        message: 'Tidak ada koordinat rute GPS untuk diekspor.',
-        confirmText: 'OK',
-        onConfirm: () => setModalConfig(prev => ({ ...prev, visible: false })),
-      });
+      Alert.alert('Gagal', 'Tidak ada koordinat rute yang valid untuk dibagikan.');
     }
   };
 
@@ -550,14 +622,15 @@ export default function MainApp() {
   const todayStart = new Date();
   todayStart.setHours(0, 0, 0, 0);
   const todayActivities = history.filter(h => (h.timestamp || 0) >= todayStart.getTime());
+
   const todayCalories =
     todayActivities.reduce((acc, h) => acc + (h.calories || 0), 0) + Math.round(todaySteps * 0.04);
   const targetCalories = 500;
   const calPercent = Math.min(100, Math.round((todayCalories / targetCalories) * 100));
 
-  const todayActiveMinutes =
-    Math.round(todayActivities.reduce((acc, h) => acc + (h.durationSec || 0), 0) / 60) +
-    Math.round(todaySteps / 115);
+  const todayActiveMinutes = Math.round(
+    todayActivities.reduce((acc, h) => acc + (h.durationSec || 0), 0) / 60
+  );
   const targetActiveMinutes = 45;
   const minPercent = Math.min(100, Math.round((todayActiveMinutes / targetActiveMinutes) * 100));
 
@@ -611,7 +684,6 @@ export default function MainApp() {
     thisMonday.setHours(0, 0, 0, 0);
 
     const weeks = [];
-
     const filteredHistory = history.filter(h => {
       if (progressFilter === 'all') return true;
       return h.type === progressFilter;
@@ -668,12 +740,8 @@ export default function MainApp() {
     PanResponder.create({
       onStartShouldSetPanResponder: () => true,
       onMoveShouldSetPanResponder: () => true,
-      onPanResponderGrant: (evt) => {
-        handleChartTouch(evt.nativeEvent.locationX);
-      },
-      onPanResponderMove: (evt) => {
-        handleChartTouch(evt.nativeEvent.locationX);
-      },
+      onPanResponderGrant: (evt) => handleChartTouch(evt.nativeEvent.locationX),
+      onPanResponderMove: (evt) => handleChartTouch(evt.nativeEvent.locationX),
     })
   ).current;
 
@@ -697,9 +765,10 @@ export default function MainApp() {
   const xAxisMonths = getXAxisMonths();
 
   const generateInteractiveRouteHtml = (route: { latitude: number; longitude: number }[]) => {
-    const coordsJson = JSON.stringify((route || []).map(r => [r.latitude, r.longitude]));
-    const fallbackLat = route && route.length > 0 ? route[0].latitude : -6.175392;
-    const fallbackLng = route && route.length > 0 ? route[0].longitude : 106.827153;
+    const safeRoute = Array.isArray(route) ? route : [];
+    const coordsJson = JSON.stringify(safeRoute.map(r => [r.latitude, r.longitude]));
+    const fallbackLat = safeRoute.length > 0 ? safeRoute[0].latitude : -6.175392;
+    const fallbackLng = safeRoute.length > 0 ? safeRoute[0].longitude : 106.827153;
 
     return `
     <!DOCTYPE html>
@@ -738,9 +807,8 @@ export default function MainApp() {
     `;
   };
 
-  // Helper Pengubah Koordinat Route ke SVG Polyline Terpusat untuk Kartu Download Transparan
   const convertRouteToSvgPoints = (route: { latitude: number; longitude: number }[], svgW: number, svgH: number) => {
-    if (!route || route.length < 2) return '';
+    if (!route || !Array.isArray(route) || route.length < 2) return '';
     const lats = route.map(r => r.latitude);
     const lngs = route.map(r => r.longitude);
     const minLat = Math.min(...lats);
@@ -751,7 +819,7 @@ export default function MainApp() {
     const deltaLat = maxLat - minLat || 0.001;
     const deltaLng = maxLng - minLng || 0.001;
 
-    const pad = 20;
+    const pad = 24;
     const drawW = svgW - pad * 2;
     const drawH = svgH - pad * 2;
 
@@ -777,7 +845,6 @@ export default function MainApp() {
               </View>
             </View>
 
-            {/* Target 3 Cincin Harian */}
             <View style={[styles.cardClean, { backgroundColor: theme.card, borderColor: theme.border }]}>
               <View style={styles.cardHeaderRow}>
                 <View style={styles.titleWithIcon}>
@@ -789,11 +856,12 @@ export default function MainApp() {
                   onPress={async () => {
                     const granted = await requestBackgroundStepPermissions();
                     if (granted) {
+                      await syncBackgroundSteps();
                       setModalConfig({
                         visible: true,
                         type: 'success',
                         title: 'Izin Latar Belakang Aktif',
-                        message: 'Sensor langkah tetap berjalan saat aplikasi diminimalkan atau ditutup.',
+                        message: 'Pelacakan langkah otomatis tersinkronisasi dengan sensor internal hardware ponsel.',
                         confirmText: 'OK',
                         onConfirm: () => setModalConfig(prev => ({ ...prev, visible: false })),
                       });
@@ -884,7 +952,6 @@ export default function MainApp() {
               </View>
             </View>
 
-            {/* Aktivitas Terakhir */}
             {latestActivity ? (
               <View style={[styles.cardClean, { backgroundColor: theme.card, borderColor: theme.border }]}>
                 <View style={styles.cardHeaderRow}>
@@ -929,7 +996,7 @@ export default function MainApp() {
               </View>
             ) : null}
 
-            {/* Widget Streak Beruntun - Ikon Api Tengah Ada Angka */}
+            {/* Widget Streak Beruntun */}
             <TouchableOpacity
               style={[styles.streakWidgetCard, { backgroundColor: theme.card, borderColor: theme.border }]}
               activeOpacity={0.85}
@@ -945,10 +1012,7 @@ export default function MainApp() {
 
               <View style={styles.streakWidgetContent}>
                 <View style={styles.flameContainer}>
-                  <View style={styles.flameCircleIconOnly}>
-                    <Ionicons name="flame" size={54} color="#ea580c" />
-                    <Text style={styles.flameCountTextCenter}>{calculatedWeeklyStreak}</Text>
-                  </View>
+                  <SolidFlameWithNumber count={calculatedWeeklyStreak} size={54} />
                   <Text style={styles.flameWeekText}>Minggu</Text>
                 </View>
 
@@ -978,7 +1042,6 @@ export default function MainApp() {
               </View>
             </TouchableOpacity>
 
-            {/* Pemanasan & Pendinginan */}
             <View style={[styles.cardClean, { backgroundColor: theme.card, borderColor: theme.border }]}>
               <View style={styles.cardHeaderRow}>
                 <View style={styles.titleWithIcon}>
@@ -1135,7 +1198,7 @@ export default function MainApp() {
           </View>
         )}
 
-        {/* ==================== TAB 3: ANDA (KEMAJUAN & RIWAYAT) ==================== */}
+        {/* ==================== TAB 3: ANDA ==================== */}
         {activeTab === 'profile' && (
           <View style={styles.profileContainer}>
             <View style={styles.profileHeader}>
@@ -1155,7 +1218,6 @@ export default function MainApp() {
               </View>
             </View>
 
-            {/* TAB KEMAJUAN DENGAN FITUR GESER GARIS */}
             {profileSubTab === 'progress' && (
               <ScrollView showsVerticalScrollIndicator={false} contentContainerStyle={styles.scrollPadding}>
                 <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={{ gap: 10, marginBottom: 16 }}>
@@ -1366,20 +1428,14 @@ export default function MainApp() {
                       </View>
                     </View>
 
-                    {/* Tombol Bagikan Hasil & Unduh Transparan */}
                     <View style={styles.cardActionRow}>
-                      <TouchableOpacity style={[styles.outlineBtn, { borderColor: theme.border }]} onPress={() => setSelectedShareItem(item)}>
-                        <Ionicons name="share-social-outline" size={14} color={theme.textMain} />
-                        <Text style={[styles.outlineBtnText, { color: theme.textMain }]}>Bagikan</Text>
-                      </TouchableOpacity>
-
                       <TouchableOpacity style={[styles.outlineBtn, { borderColor: '#ea580c' }]} onPress={() => setSelectedDownloadItem(item)}>
-                        <Ionicons name="download-outline" size={14} color="#ea580c" />
-                        <Text style={[styles.outlineBtnText, { color: '#ea580c' }]}>Unduh</Text>
+                        <Ionicons name="image-outline" size={15} color="#ea580c" />
+                        <Text style={[styles.outlineBtnText, { color: '#ea580c' }]}>Gambar</Text>
                       </TouchableOpacity>
 
-                      <TouchableOpacity style={[styles.outlineBtn, { borderColor: theme.border }]} onPress={() => handleExportGpxFile(item)}>
-                        <Ionicons name="document-text-outline" size={14} color="#0284c7" />
+                      <TouchableOpacity style={[styles.outlineBtn, { borderColor: '#0284c7' }]} onPress={() => setSelectedGpxItem(item)}>
+                        <Ionicons name="document-text-outline" size={15} color="#0284c7" />
                         <Text style={[styles.outlineBtnText, { color: '#0284c7' }]}>GPX</Text>
                       </TouchableOpacity>
                     </View>
@@ -1453,12 +1509,12 @@ export default function MainApp() {
               <View style={styles.streakSheetHandle} />
             </View>
 
-            <ViewShot ref={streakShareRef} options={{ format: 'png', quality: 1.0 }} style={{ backgroundColor: theme.card, paddingBottom: 10 }}>
+            <View style={{ backgroundColor: theme.card, paddingBottom: 10 }}>
               <View style={styles.streakCalendarTopBar}>
                 <Text style={[styles.calendarMonthHeading, { color: theme.textMain }]}>{monthName}</Text>
-                <TouchableOpacity style={styles.btnSharePill} onPress={handleShareStreak}>
-                  <Ionicons name="share-social-outline" size={16} color={theme.textMain} />
-                  <Text style={[styles.btnSharePillText, { color: theme.textMain }]}>Bagikan</Text>
+                <TouchableOpacity style={styles.btnSharePill} onPress={() => setStreakModalVisible(false)}>
+                  <Ionicons name="close" size={16} color={theme.textMain} />
+                  <Text style={[styles.btnSharePillText, { color: theme.textMain }]}>Tutup</Text>
                 </TouchableOpacity>
               </View>
 
@@ -1507,17 +1563,13 @@ export default function MainApp() {
                   </View>
                 </View>
 
-                {/* Kolom Indikator Api Vertikal Sejajar Minggu Berjalan - Ikon Api Tengah Ada Angka */}
                 <View style={styles.streakColumnPill}>
                   {Array.from({ length: totalCalendarRows }).map((_, rIdx) => {
                     const isFlameRow = rIdx === todayWeekRowIndex;
                     return (
                       <View key={rIdx} style={styles.streakSlotRow}>
                         {isFlameRow ? (
-                          <View style={styles.stravaFlameBadgeIconOnly}>
-                            <Ionicons name="flame" size={32} color="#ea580c" />
-                            <Text style={styles.stravaFlameNumberInside}>{calculatedWeeklyStreak}</Text>
-                          </View>
+                          <SolidFlameWithNumber count={calculatedWeeklyStreak} size={28} />
                         ) : (
                           <View style={styles.streakEmptySlotDot} />
                         )}
@@ -1526,7 +1578,7 @@ export default function MainApp() {
                   })}
                 </View>
               </View>
-            </ViewShot>
+            </View>
 
             <TouchableOpacity style={styles.btnCloseCalendar} onPress={() => setStreakModalVisible(false)}>
               <Text style={styles.btnCloseCalendarText}>Tutup</Text>
@@ -1535,7 +1587,7 @@ export default function MainApp() {
         </View>
       </Modal>
 
-      {/* ==================== MODAL UNDUH GAMBAR TRANSPARAN ==================== */}
+      {/* ==================== MODAL UNDUH & BAGIKAN GAMBAR ==================== */}
       <Modal visible={selectedDownloadItem !== null} transparent animationType="fade">
         <View style={styles.downloadModalBackdrop}>
           <View style={styles.downloadCardWrapper}>
@@ -1547,122 +1599,111 @@ export default function MainApp() {
             </View>
 
             {selectedDownloadItem && (
-              <ViewShot
-                ref={downloadCardRef}
-                options={{ format: 'png', quality: 1.0 }}
-                style={styles.transparentCaptureCanvas}
-              >
-                {/* 1. Baris Jarak */}
-                <View style={styles.canvasTextGroup}>
-                  <Text style={styles.canvasHeaderLabel}>Jarak</Text>
-                  <Text style={styles.canvasBigValue}>{selectedDownloadItem.distanceDisplay}</Text>
-                </View>
+              <View style={styles.transparentCanvasContainer} collapsable={false}>
+                <ViewShot
+                  ref={downloadCardRef}
+                  options={{ format: 'png', quality: 1.0 }}
+                  style={styles.transparentCaptureCanvas}
+                >
+                  <View style={styles.canvasTextGroup}>
+                    <Text style={styles.canvasHeaderLabel}>Jarak</Text>
+                    <Text style={styles.canvasBigValue}>{selectedDownloadItem.distanceDisplay || '0 m'}</Text>
+                  </View>
 
-                {/* 2. Baris Pace / Parameter Kategori */}
-                <View style={styles.canvasTextGroup}>
-                  <Text style={styles.canvasHeaderLabel}>
-                    {selectedDownloadItem.type === 'walk'
-                      ? 'Langkah'
-                      : selectedDownloadItem.type === 'bike'
-                      ? 'Kecepatan'
-                      : 'Pace'}
-                  </Text>
-                  <Text style={styles.canvasBigValue}>
-                    {selectedDownloadItem.type === 'walk'
-                      ? `${selectedDownloadItem.steps || 0}`
-                      : `${selectedDownloadItem.paceFormatted} /km`}
-                  </Text>
-                </View>
+                  <View style={styles.canvasTextGroup}>
+                    <Text style={styles.canvasHeaderLabel}>
+                      {selectedDownloadItem.type === 'walk'
+                        ? 'Langkah'
+                        : selectedDownloadItem.type === 'bike'
+                        ? 'Kecepatan'
+                        : 'Pace'}
+                    </Text>
+                    <Text style={styles.canvasBigValue}>
+                      {selectedDownloadItem.type === 'walk'
+                        ? `${selectedDownloadItem.steps || 0}`
+                        : `${selectedDownloadItem.paceFormatted || "--'--\""} /km`}
+                    </Text>
+                  </View>
 
-                {/* 3. Baris Waktu */}
-                <View style={styles.canvasTextGroup}>
-                  <Text style={styles.canvasHeaderLabel}>Waktu</Text>
-                  <Text style={styles.canvasBigValue}>{selectedDownloadItem.durationFormatted}</Text>
-                </View>
+                  <View style={styles.canvasTextGroup}>
+                    <Text style={styles.canvasHeaderLabel}>Waktu</Text>
+                    <Text style={styles.canvasBigValue}>{selectedDownloadItem.durationFormatted || '00:00'}</Text>
+                  </View>
 
-                {/* 4. Visual Rute Murni (SVG Line Tanpa Map) */}
-                <View style={styles.canvasRouteWrap}>
-                  {selectedDownloadItem.route && selectedDownloadItem.route.length > 1 ? (
-                    <Svg width={200} height={200}>
-                      <Polyline
-                        points={convertRouteToSvgPoints(selectedDownloadItem.route, 200, 200)}
-                        fill="none"
-                        stroke="#ea580c"
-                        strokeWidth="4"
-                        strokeLinecap="round"
-                        strokeLinejoin="round"
-                      />
-                    </Svg>
-                  ) : (
-                    <Ionicons name="walk" size={48} color="#ea580c" />
-                  )}
-                </View>
+                  <View style={styles.canvasRouteWrap}>
+                    {selectedDownloadItem.route && selectedDownloadItem.route.length > 1 ? (
+                      <Svg width={220} height={220}>
+                        <Polyline
+                          points={convertRouteToSvgPoints(selectedDownloadItem.route, 220, 220)}
+                          fill="none"
+                          stroke="#ea580c"
+                          strokeWidth="5"
+                          strokeLinecap="round"
+                          strokeLinejoin="round"
+                        />
+                      </Svg>
+                    ) : (
+                      <Ionicons name="walk" size={54} color="#ea580c" />
+                    )}
+                  </View>
 
-                {/* 5. Watermark Logo & Brand XOFIT */}
-                <View style={styles.canvasWatermarkRow}>
-                  <Image
-                    source={require('../../assets/images/icon.png')}
-                    style={styles.canvasWatermarkIcon}
-                    resizeMode="contain"
-                  />
-                  <Text style={styles.canvasWatermarkText}>XOFIT</Text>
-                </View>
-              </ViewShot>
+                  <View style={styles.canvasWatermarkRow}>
+                    <Image
+                      source={require('../../assets/images/icon.png')}
+                      style={styles.canvasWatermarkIcon}
+                      resizeMode="contain"
+                    />
+                    <Text style={styles.canvasWatermarkText}>XOFIT</Text>
+                  </View>
+                </ViewShot>
+              </View>
             )}
 
-            <TouchableOpacity style={styles.btnExecuteDownload} onPress={handleExecuteDownload}>
-              <Ionicons name="cloud-download-outline" size={20} color="#ffffff" />
-              <Text style={styles.btnExecuteDownloadText}>Simpan PNG Transparan</Text>
-            </TouchableOpacity>
+            {/* Dua Tombol: Unduh dan Bagikan Gambar */}
+            <View style={styles.twoButtonModalRow}>
+              <TouchableOpacity style={styles.btnDualDownload} onPress={handleExecuteSaveImage}>
+                <Ionicons name="download" size={18} color="#ffffff" />
+                <Text style={styles.btnDualText}>Unduh</Text>
+              </TouchableOpacity>
+
+              <TouchableOpacity style={styles.btnDualShare} onPress={handleExecuteShareImage}>
+                <Ionicons name="share-social" size={18} color="#ffffff" />
+                <Text style={styles.btnDualText}>Bagikan</Text>
+              </TouchableOpacity>
+            </View>
           </View>
         </View>
       </Modal>
 
-      {/* MODAL BAGIKAN HASIL LATIHAN */}
-      <Modal visible={selectedShareItem !== null} transparent animationType="fade">
-        <View style={styles.streakModalBackdrop}>
-          <TouchableOpacity
-            style={styles.streakBackdropDismiss}
-            activeOpacity={1}
-            onPress={() => setSelectedShareItem(null)}
-          />
-          <View style={[styles.shareWrap, { backgroundColor: theme.card, borderColor: theme.border, marginBottom: Math.max(insets.bottom, 20) }]}>
-            <View style={styles.cardHeaderRow}>
-              <Text style={[styles.sectionTitle, { color: theme.textMain }]}>Bagikan Hasil Latihan</Text>
-              <TouchableOpacity onPress={() => setSelectedShareItem(null)}>
+      {/* ==================== MODAL PILIHAN AKSI GPX ==================== */}
+      <Modal visible={selectedGpxItem !== null} transparent animationType="fade">
+        <View style={styles.downloadModalBackdrop}>
+          <View style={[styles.gpxDialogCard, { backgroundColor: theme.card, borderColor: theme.border }]}>
+            <View style={styles.gpxDialogHeader}>
+              <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
+                <Ionicons name="document-text" size={20} color="#0284c7" />
+                <Text style={[styles.sectionTitle, { color: theme.textMain }]}>Ekspor Berkas GPX</Text>
+              </View>
+              <TouchableOpacity onPress={() => setSelectedGpxItem(null)}>
                 <Ionicons name="close" size={22} color={theme.textMuted} />
               </TouchableOpacity>
             </View>
 
-            {selectedShareItem && (
-              <ViewShot ref={shareCardRef} options={{ format: 'png', quality: 1.0 }} style={styles.shareSnapshotCard}>
-                <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' }}>
-                  <Text style={styles.snapshotLogo}>XOFIT PRO</Text>
-                  <Text style={styles.snapshotDate}>{selectedShareItem.dateStr}</Text>
-                </View>
-                <Text style={styles.snapshotTitle}>{selectedShareItem.title}</Text>
+            <Text style={[styles.gpxDialogDesc, { color: theme.textMuted }]}>
+              Pilih tindakan untuk berkas koordinat rute GPS "{selectedGpxItem?.title || 'Aktivitas'}":
+            </Text>
 
-                <View style={styles.snapshotGrid}>
-                  <View style={styles.snapshotStat}>
-                    <Text style={styles.snapLabel}>JARAK</Text>
-                    <Text style={styles.snapVal}>{selectedShareItem.distanceDisplay}</Text>
-                  </View>
-                  <View style={styles.snapshotStat}>
-                    <Text style={styles.snapLabel}>PACE</Text>
-                    <Text style={styles.snapVal}>{selectedShareItem.paceFormatted}</Text>
-                  </View>
-                  <View style={styles.snapshotStat}>
-                    <Text style={styles.snapLabel}>DURASI</Text>
-                    <Text style={styles.snapVal}>{selectedShareItem.durationFormatted}</Text>
-                  </View>
-                </View>
-              </ViewShot>
-            )}
+            <View style={styles.twoButtonModalRow}>
+              <TouchableOpacity style={styles.btnGpxDownload} onPress={handleExecuteDownloadGpx}>
+                <Ionicons name="cloud-download-outline" size={18} color="#ffffff" />
+                <Text style={styles.btnDualText}>Unduh GPX</Text>
+              </TouchableOpacity>
 
-            <TouchableOpacity style={styles.btnShareExecute} onPress={handleExecuteShare}>
-              <Ionicons name="share-outline" size={18} color="#ffffff" />
-              <Text style={styles.btnShareExecuteText}>Simpan & Bagikan</Text>
-            </TouchableOpacity>
+              <TouchableOpacity style={styles.btnGpxShare} onPress={handleExecuteShareGpx}>
+                <Ionicons name="share-social-outline" size={18} color="#ffffff" />
+                <Text style={styles.btnDualText}>Bagikan GPX</Text>
+              </TouchableOpacity>
+            </View>
           </View>
         </View>
       </Modal>
@@ -1763,22 +1804,20 @@ const styles = StyleSheet.create({
   streakWidgetContent: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' },
   flameContainer: { alignItems: 'center' },
 
-  // Ikon Api Murni dengan Angka di Tengahnya
-  flameCircleIconOnly: {
-    width: 60,
-    height: 60,
+  solidFlameNumberBadge: {
+    position: 'absolute',
+    bottom: 8,
     alignItems: 'center',
     justifyContent: 'center',
-    position: 'relative',
   },
-  flameCountTextCenter: {
-    position: 'absolute',
-    fontSize: 16,
+  solidFlameNumberText: {
     fontWeight: '900',
     color: '#ffffff',
-    bottom: 12,
+    textShadowColor: 'rgba(0, 0, 0, 0.6)',
+    textShadowOffset: { width: 0, height: 1 },
+    textShadowRadius: 2,
   },
-  flameWeekText: { fontSize: 14, fontWeight: '800', color: '#ea580c', marginTop: 2 },
+  flameWeekText: { fontSize: 13, fontWeight: '800', color: '#ea580c', marginTop: 2 },
   dotMatrix: { gap: 6 },
   dotMatrixRow: { flexDirection: 'row', gap: 6 },
   matrixDot: { width: 10, height: 10, borderRadius: 5 },
@@ -1835,9 +1874,11 @@ const styles = StyleSheet.create({
   historyStatsRow: { flexDirection: 'row', justifyContent: 'space-between', marginVertical: 6 },
   statSubLabel: { fontSize: 9, fontWeight: '800' },
   statSubVal: { fontSize: 13, fontWeight: '800', marginTop: 1 },
-  cardActionRow: { flexDirection: 'row', gap: 6, marginTop: 8 },
-  outlineBtn: { flex: 1, flexDirection: 'row', justifyContent: 'center', alignItems: 'center', gap: 4, paddingVertical: 8, borderRadius: 10, borderWidth: 1 },
-  outlineBtnText: { fontSize: 11, fontWeight: '700' },
+
+  // Aksi Kartu Riwayat: Tombol Gambar & GPX
+  cardActionRow: { flexDirection: 'row', gap: 10, marginTop: 10 },
+  outlineBtn: { flex: 1, flexDirection: 'row', justifyContent: 'center', alignItems: 'center', gap: 6, paddingVertical: 10, borderRadius: 12, borderWidth: 1.2 },
+  outlineBtnText: { fontSize: 12, fontWeight: '800' },
   emptyBox: { padding: 40, alignItems: 'center' },
 
   bottomTabBar: {
@@ -1869,7 +1910,7 @@ const styles = StyleSheet.create({
   streakSheetHandle: { width: 48, height: 5, borderRadius: 3, backgroundColor: '#94a3b8', alignSelf: 'center' },
   streakCalendarTopBar: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 14 },
   calendarMonthHeading: { fontSize: 20, fontWeight: '900' },
-  btnSharePill: { flexDirection: 'row', alignItems: 'center', gap: 6, borderWidth: 1.5, borderColor: '#e2e8f0', paddingHorizontal: 12, paddingVertical: 6, borderRadius: 20 },
+  btnSharePill: { flexDirection: 'row', alignItems: 'center', gap: 4, borderWidth: 1.5, borderColor: '#e2e8f0', paddingHorizontal: 12, paddingVertical: 6, borderRadius: 20 },
   btnSharePillText: { fontSize: 12, fontWeight: '800' },
   streakMetricsHeader: { flexDirection: 'row', gap: 36, marginBottom: 16 },
   streakSubLabel: { fontSize: 11, fontWeight: '600' },
@@ -1906,20 +1947,6 @@ const styles = StyleSheet.create({
     borderWidth: 1.5,
     borderColor: '#fed7aa',
   },
-  stravaFlameBadgeIconOnly: {
-    width: 38,
-    height: 42,
-    alignItems: 'center',
-    justifyContent: 'center',
-    position: 'relative',
-  },
-  stravaFlameNumberInside: {
-    position: 'absolute',
-    bottom: 8,
-    fontSize: 10,
-    fontWeight: '900',
-    color: '#ffffff',
-  },
 
   btnCloseCalendar: { backgroundColor: '#ea580c', paddingVertical: 14, borderRadius: 14, alignItems: 'center', marginTop: 12 },
   btnCloseCalendarText: { color: '#ffffff', fontSize: 15, fontWeight: '800' },
@@ -1935,19 +1962,7 @@ const styles = StyleSheet.create({
   routineSecondaryText: { fontSize: 13, fontWeight: '700' },
   routinePrimaryBtn: { flex: 1.4, flexDirection: 'row', justifyContent: 'center', alignItems: 'center', gap: 6, backgroundColor: '#ea580c', paddingVertical: 12, borderRadius: 12 },
   routinePrimaryText: { color: '#ffffff', fontSize: 13, fontWeight: '800' },
-  shareWrap: { width: '100%', borderRadius: 20, padding: 18, borderWidth: 1 },
-  shareSnapshotCard: { backgroundColor: '#090d16', padding: 18, borderRadius: 16, marginBottom: 14, borderWidth: 1, borderColor: '#ea580c' },
-  snapshotLogo: { color: '#ea580c', fontSize: 11, fontWeight: '900', letterSpacing: 1.2 },
-  snapshotTitle: { color: '#ffffff', fontSize: 16, fontWeight: '800', marginTop: 6 },
-  snapshotDate: { color: '#94a3b8', fontSize: 11 },
-  snapshotGrid: { flexDirection: 'row', justifyContent: 'space-between', marginTop: 14 },
-  snapshotStat: { flex: 1, backgroundColor: '#131c2e', padding: 8, borderRadius: 8, alignItems: 'center', marginHorizontal: 2 },
-  snapLabel: { color: '#94a3b8', fontSize: 8, fontWeight: '800' },
-  snapVal: { color: '#ffffff', fontSize: 12, fontWeight: '800', marginTop: 2 },
-  btnShareExecute: { backgroundColor: '#ea580c', paddingVertical: 12, borderRadius: 12, flexDirection: 'row', justifyContent: 'center', alignItems: 'center', gap: 6 },
-  btnShareExecuteText: { color: '#ffffff', fontSize: 14, fontWeight: '800' },
 
-  // STYLES MODAL UNDUH TRANSPARAN
   downloadModalBackdrop: {
     flex: 1,
     backgroundColor: 'rgba(0, 0, 0, 0.88)',
@@ -1968,6 +1983,10 @@ const styles = StyleSheet.create({
     marginBottom: 12,
     paddingHorizontal: 8,
   },
+  transparentCanvasContainer: {
+    width: '100%',
+    alignItems: 'center',
+  },
   transparentCaptureCanvas: {
     width: '100%',
     backgroundColor: 'transparent',
@@ -1977,7 +1996,7 @@ const styles = StyleSheet.create({
   },
   canvasTextGroup: {
     alignItems: 'center',
-    marginBottom: 18,
+    marginBottom: 16,
   },
   canvasHeaderLabel: {
     color: '#ffffff',
@@ -1993,11 +2012,11 @@ const styles = StyleSheet.create({
     letterSpacing: -0.5,
   },
   canvasRouteWrap: {
-    width: 200,
-    height: 200,
+    width: 220,
+    height: 220,
     alignItems: 'center',
     justifyContent: 'center',
-    marginVertical: 16,
+    marginVertical: 12,
   },
   canvasWatermarkRow: {
     flexDirection: 'row',
@@ -2015,21 +2034,77 @@ const styles = StyleSheet.create({
     fontWeight: '900',
     letterSpacing: 2,
   },
-  btnExecuteDownload: {
+
+  // Komponen Dua Tombol Berdampingan
+  twoButtonModalRow: {
+    flexDirection: 'row',
+    gap: 12,
+    width: '100%',
+    marginTop: 16,
+  },
+  btnDualDownload: {
+    flex: 1,
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'center',
     gap: 8,
     backgroundColor: '#ea580c',
-    width: '100%',
-    paddingVertical: 15,
-    borderRadius: 16,
-    marginTop: 16,
-    elevation: 4,
+    paddingVertical: 14,
+    borderRadius: 14,
   },
-  btnExecuteDownloadText: {
+  btnDualShare: {
+    flex: 1,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 8,
+    backgroundColor: '#0284c7',
+    paddingVertical: 14,
+    borderRadius: 14,
+  },
+  btnDualText: {
     color: '#ffffff',
-    fontSize: 15,
+    fontSize: 14,
     fontWeight: '800',
+  },
+
+  // Modal Dialog Pilihan GPX
+  gpxDialogCard: {
+    width: '100%',
+    maxWidth: 380,
+    borderRadius: 20,
+    padding: 20,
+    borderWidth: 1,
+  },
+  gpxDialogHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: 12,
+  },
+  gpxDialogDesc: {
+    fontSize: 13,
+    lineHeight: 18,
+    marginBottom: 8,
+  },
+  btnGpxDownload: {
+    flex: 1,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 8,
+    backgroundColor: '#0284c7',
+    paddingVertical: 14,
+    borderRadius: 14,
+  },
+  btnGpxShare: {
+    flex: 1,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 8,
+    backgroundColor: '#ea580c',
+    paddingVertical: 14,
+    borderRadius: 14,
   },
 });

@@ -1,11 +1,11 @@
 import * as TaskManager from 'expo-task-manager';
 import * as Location from 'expo-location';
 import { Pedometer } from 'expo-sensors';
-import { getDailyStats, updateDailyStats } from './storage';
+import { Platform } from 'react-native';
+import { updateDailyStats } from './storage';
 
 export const BACKGROUND_STEP_TASK = 'BACKGROUND_STEP_TRACKER_TASK';
 
-// Mendaftarkan task latar belakang
 TaskManager.defineTask(BACKGROUND_STEP_TASK, async ({ data, error }) => {
   if (error) {
     console.error('Background task error:', error);
@@ -13,7 +13,7 @@ TaskManager.defineTask(BACKGROUND_STEP_TASK, async ({ data, error }) => {
   }
   try {
     const isAvailable = await Pedometer.isAvailableAsync();
-    if (isAvailable) {
+    if (isAvailable && Platform.OS === 'ios') {
       const start = new Date();
       start.setHours(0, 0, 0, 0);
       const end = new Date();
@@ -27,7 +27,6 @@ TaskManager.defineTask(BACKGROUND_STEP_TASK, async ({ data, error }) => {
   }
 });
 
-// Fungsi Permintaan Izin Latar Belakang Lengkap
 export const requestBackgroundStepPermissions = async (): Promise<boolean> => {
   try {
     const { status: fgStatus } = await Location.requestForegroundPermissionsAsync();
@@ -55,7 +54,7 @@ export const requestBackgroundStepPermissions = async (): Promise<boolean> => {
     }
     return true;
   } catch (err) {
-    console.log('Permission request error:', err);
+    console.log('Permission request error (Expo Go limited background):', err);
     return false;
   }
 };
