@@ -1,56 +1,108 @@
-# Welcome to your Expo app 👋
+# 🏃 XoFit (Track • Run • Ride)
 
-This is an [Expo](https://expo.dev) project created with [`create-expo-app`](https://www.npmjs.com/package/create-expo-app).
+**XoFit** adalah aplikasi pelacak kebugaran dan aktivitas fisik berbasis **React Native** dan **Expo**. Dirancang untuk merekam aktivitas jalan kaki (*walk*), lari (*run*), hingga bersepeda (*bike*) dengan visualisasi rute interaktif, pelacakan sensor di latar belakang, kalkulator IMT/BMI, dan ekspor berkas GPX.
 
-## Get started
+---
 
-1. Install dependencies
+## ✨ Fitur Utama
 
-   ```bash
-   npm install
-   ```
+- **Aktivitas & Rute Terpadu**: Melacak koordinat GPS, jarak tempuh, durasi, *instant pace*, estimasi kalori terbakar, dan kenaikan elevasi.
+- **Peta Rute Interaktif (Leaflet)**: Peta berbasis Leaflet di dalam WebView dengan render polyline rute dan *radar rekomendasi rute*.
+- **Background Step & Task Manager**: Pencatatan langkah dan lokasi tetap berjalan di latar belakang menggunakan `expo-task-manager` & `expo-sensors`.
+- **Kalkulator IMT / BMI**: Penghitungan indeks massa tubuh lengkap dengan busur *radial gauge*, kategori berat badan, dan kalkulasi berat ideal formula Broca.
+- **Ekspor & Berbagi**:
+  - Simpan dan bagikan *infografis rute* via `react-native-view-shot` dan `expo-sharing`.
+  - Ekspor log riwayat aktivitas ke dalam format standar **GPX (`.gpx`)**.
+- **Dark Mode Dinamis**: Tampilan adaptif otomatis mengikuti setelan tema sistem operasi perangkat.
 
-2. Start the app
+---
 
-   ```bash
-   npx expo start
-   ```
+## 🛠 Prasyarat
 
-In the output, you'll find options to open the app in a
+Sebelum menjalankan proyek, pastikan sudah menginstal:
+- [Node.js](https://nodejs.org/) (versi LTS 18.x atau yang lebih baru)
+- [Git](https://git-scm.com/)
+- Perangkat Android/iOS fisik (dengan aplikasi **Expo Go** terinstal) atau Android Studio / Xcode Emulator
 
-- [development build](https://docs.expo.dev/develop/development-builds/introduction/)
-- [Android emulator](https://docs.expo.dev/workflow/android-studio-emulator/)
-- [iOS simulator](https://docs.expo.dev/workflow/ios-simulator/)
-- [Expo Go](https://expo.dev/go), a limited sandbox for trying out app development with Expo
+---
 
-You can start developing by editing the files inside the **app** directory. This project uses [file-based routing](https://docs.expo.dev/router/introduction).
+## 🚀 Panduan Instalasi & Menjalankan Proyek
 
-## Get a fresh project
+Ikuti langkah-langkah berikut secara berurutan di terminal:
 
-When you're ready, run:
-
+### 1. Kloning Repositori
+Clone repositori proyek ini ke komputer lokal kamu dan masuk ke foldernya:
 ```bash
-npm run reset-project
+git clone https://github.com/username-kamu/xofit.git
+cd xofit
 ```
 
-This command will move the starter code to the **app-example** directory and create a blank **app** directory where you can start developing.
+### 2. Instal Dependensi Dasar Proyek
+Instal modul dasar yang terdaftar di berkas `package.json`:
+```bash
+npm install
+```
 
-### Other setup steps
+### 3. Instal Paket Dependensi Expo
+Jalankan perintah berikut untuk memastikan semua modul Expo, sensor, grafis SVG, WebView, dan native runtime terpasang dengan versi yang sesuai (*compatible*) dengan Expo SDK yang digunakan:
 
-- To set up ESLint for linting, run `npx expo lint`, or follow our guide on ["Using ESLint and Prettier"](https://docs.expo.dev/guides/using-eslint/)
-- If you'd like to set up unit testing, follow our guide on ["Unit Testing with Jest"](https://docs.expo.dev/develop/unit-testing/)
-- Learn more about the TypeScript setup in this template in our guide on ["Using TypeScript"](https://docs.expo.dev/guides/typescript/)
+```bash
+npx expo install expo-router expo-status-bar expo-splash-screen expo-location expo-sensors expo-media-library expo-image expo-web-browser expo-sharing expo-symbols expo-task-manager expo-file-system react-native-safe-area-context react-native-screens react-native-svg react-native-webview react-native-view-shot @react-native-async-storage/async-storage @expo/vector-icons
+```
 
-## Learn more
+#### Catatan Dependensi:
+- `expo-location` & `expo-task-manager`: Pelacakan koordinat GPS di *foreground* dan *background*.
+- `expo-sensors`: Sensor akselerometer dan penghitung langkah (*pedometer*).
+- `react-native-webview`: Menjalankan Leaflet map interaktif.
+- `react-native-svg`: Render grafis lingkaran cincin progres (*rings*) dan busur gauge IMT.
+- `react-native-view-shot` & `expo-sharing`: Mengambil tangkapan layar hasil latihan dan membagikannya ke media sosial/penyimpanan.
+- `@react-native-async-storage/async-storage`: Penyimpanan data profil dan riwayat latihan secara offline.
 
-To learn more about developing your project with Expo, look at the following resources:
+### 4. Jalankan Aplikasi
+Mulai server Metro bundler:
+```bash
+npx expo start
+```
 
-- [Expo documentation](https://docs.expo.dev/): Learn fundamentals, or go into advanced topics with our [guides](https://docs.expo.dev/guides).
-- [Learn Expo tutorial](https://docs.expo.dev/tutorial/introduction/): Follow a step-by-step tutorial where you'll create a project that runs on Android, iOS, and the web.
+Atau jika ingin membersihkan cache terlebih dahulu:
+```bash
+npx expo start -c
+```
 
-## Join the community
+### 5. Membuka di Perangkat
+Setelah server berjalan, pilih cara membuka aplikasi:
+- **Perangkat Fisik**: Buka aplikasi **Expo Go** di HP kamu, lalu pindai QR code yang tampil di terminal.
+- **Android Emulator**: Tekan tombol `a` pada keyboard di terminal.
+- **iOS Simulator**: Tekan tombol `i` pada keyboard di terminal.
+- **Web Browser**: Tekan tombol `w` pada keyboard di terminal.
 
-Join our community of developers creating universal apps.
+---
 
-- [Expo on GitHub](https://github.com/expo/expo): View our open source platform and contribute.
-- [Discord community](https://chat.expo.dev): Chat with Expo users and ask questions.
+## 🔒 Catatan Izin Perangkat (Permissions)
+
+Aplikasi ini memerlukan beberapa izin hardware di perangkat:
+- `ACCESS_FINE_LOCATION` & `ACCESS_BACKGROUND_LOCATION` (Pelacakan koordinat lokasi saat layar menyala maupun mati)
+- `ACTIVITY_RECOGNITION` (Akses data sensor gerak dan langkah)
+- `FOREGROUND_SERVICE` & `FOREGROUND_SERVICE_LOCATION` (Menjaga background task tetap aktif tanpa dihentikan paksa oleh sistem operasi)
+- `READ_MEDIA_IMAGES` / `WRITE_EXTERNAL_STORAGE` (Menyimpan hasil infografis dan file `.gpx` ke folder memori)
+
+> **Tips:** Fitur pelacakan latar belakang (*Background Task*) berjalan optimal pada file APK / Development Build yang dibangun menggunakan EAS Build (`npx eas build --profile development`).
+
+---
+
+## 📁 Struktur Folder Proyek
+
+```text
+├── assets/                  # Aset gambar, splash screen, dan ikon
+├── src/
+│   ├── app/                 # Struktur halaman Expo Router (_layout, bmi, tracker, dll)
+│   ├── components/          # Komponen UI reusable (NotificationModal, dll)
+│   ├── constants/           # Definisi warna tema dan tata letak
+│   └── utils/
+│       ├── backgroundStepTask.ts     # Definisi TaskManager background pedometer
+│       ├── backgroundTrackerTask.ts  # Definisi TaskManager background rute & GPS
+│       ├── gpxHelper.ts              # Generator format XML GPX dan modul share
+│       └── storage.ts                # Manajemen state & data lokal AsyncStorage
+├── app.json                 # Pengaturan izin aplikasi & konfigurasi Expo
+└── package.json
+```
